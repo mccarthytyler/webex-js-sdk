@@ -1,27 +1,16 @@
-/* eslint-disable no-param-reassign, prefer-destructuring */
-
-import {mean, max} from 'lodash';
-
 import {STATS} from '../constants';
-
-/**
- * Get the totals of a certain value from a certain media type.
- *
- * @param {object} stats - The large stats object.
- * @param {string} sendrecvType - "send" or "recv".
- * @param {string} baseMediaType - audio or video _and_ share or non-share.
- * @param {string} value - The value we want to get the totals of.
- * @returns {number}
- */
-const getTotalValueFromBaseType = (
-  stats: object,
-  sendrecvType: string,
-  baseMediaType: string,
-  value: string
-): number =>
-  Object.keys(stats)
-    .filter((mt) => mt.includes(baseMediaType))
-    .reduce((acc, mt) => acc + (stats[mt]?.[sendrecvType]?.[value] || 0), 0);
+import {
+  getBitrate,
+  getCsi,
+  getFecRecovered,
+  getMax,
+  getMean,
+  getMediaTypeDirection,
+  getRtpPackets,
+  getTotalValueFromBaseType,
+  getTotalValueFromBaseTypeArray,
+  isMainMediaType,
+} from './util';
 
 export const getAudioReceiverMqa = ({
   audioReceiver,
@@ -48,14 +37,12 @@ export const getAudioReceiverMqa = ({
   const totalFecPacketsReceived = getTotalValue('fecPacketsReceived');
   const totalFecPacketsDiscarded = getTotalValue('fecPacketsDiscarded');
 
-  audioReceiver.common.common.direction =
-    statsResults[Object.keys(statsResults).find((mediaType) => mediaType.includes(baseMediaType))]
-      ?.direction || 'inactive';
-  audioReceiver.common.common.isMain = !baseMediaType.includes('-share');
+  audioReceiver.common.common.direction = getMediaTypeDirection(statsResults, baseMediaType);
+  audioReceiver.common.common.isMain = isMainMediaType(baseMediaType);
   audioReceiver.common.transportType = statsResults.connectionType.local.transport;
 
   // add rtpPacket info inside common as also for call analyzer
-  audioReceiver.common.rtpPackets = totalPacketsReceived - lastPacketsReceived;
+  audioReceiver.common.rtpPackets = getRtpPackets(totalPacketsReceived, lastPacketsReceived);
 
   // Hop by hop are numbers and not percentage so we compare on what we sent the last min
   // collect the packets received for the last min
@@ -63,13 +50,14 @@ export const getAudioReceiverMqa = ({
   audioReceiver.common.mediaHopByHopLost = totalPacketsLost;
   audioReceiver.common.rtpHopByHopLost = totalPacketsLost;
 
-  const fecRecovered =
-    totalFecPacketsReceived -
-    lastFecPacketsReceived -
-    (totalFecPacketsDiscarded - lastFecPacketsDiscarded);
-  audioReceiver.common.fecPackets = fecRecovered;
+  audioReceiver.common.fecPackets = getFecRecovered(
+    totalFecPacketsReceived,
+    lastFecPacketsReceived,
+    totalFecPacketsDiscarded,
+    lastFecPacketsDiscarded
+  );
 
-  audioReceiver.common.rtpBitrate = ((totalBytesReceived - lastBytesReceived) * 8) / 60 || 0;
+  audioReceiver.common.rtpBitrate = getBitrate(totalBytesReceived - lastBytesReceived);
 };
 
 export const getAudioReceiverStreamMqa = ({
@@ -90,26 +78,28 @@ export const getAudioReceiverStreamMqa = ({
   const lastPacketsReceived = lastMqaDataSent[mediaType]?.[sendrecvType].totalPacketsReceived || 0;
   const lastPacketsLost = lastMqaDataSent[mediaType]?.[sendrecvType].totalPacketsLost || 0;
 
-  const {csi} = statsResults[mediaType];
-  if (csi && !audioReceiverStream.common.csi.includes(csi)) {
-    audioReceiverStream.common.csi.push(csi);
-  }
+  getCsi(statsResults, mediaType, audioReceiverStream);
 
-  audioReceiverStream.common.rtpPackets =
-    statsResults[mediaType][sendrecvType].totalPacketsReceived - lastPacketsReceived || 0;
+  audioReceiverStream.common.rtpPackets = getRtpPackets(
+    statsResults[mediaType][sendrecvType].totalPacketsReceived,
+    lastPacketsReceived
+  );
 
-  audioReceiverStream.common.maxRtpJitter =
-    // @ts-ignore
-    max(statsResults[mediaType][sendrecvType].meanRtpJitter) * 1000 || 0;
-  audioReceiverStream.common.meanRtpJitter =
-    mean(statsResults[mediaType][sendrecvType].meanRtpJitter) * 1000 || 0;
+  audioReceiverStream.common.maxRtpJitter = getMax(
+    statsResults[mediaType][sendrecvType].meanRtpJitter
+  );
+  audioReceiverStream.common.meanRtpJitter = getMean(
+    statsResults[mediaType][sendrecvType].meanRtpJitter
+  );
   audioReceiverStream.common.rtpJitter = audioReceiverStream.common.maxRtpJitter;
 
   // Fec packets do come in as part of the FEC only for audio
-  const fecRecovered =
-    statsResults[mediaType][sendrecvType].fecPacketsReceived -
-    lastFecPacketsReceived -
-    (statsResults[mediaType][sendrecvType].fecPacketsDiscarded - lastFecPacketsDiscarded);
+  const fecRecovered = getFecRecovered(
+    statsResults[mediaType][sendrecvType].fecPacketsReceived,
+    lastFecPacketsReceived,
+    statsResults[mediaType][sendrecvType].fecPacketsDiscarded,
+    lastFecPacketsDiscarded
+  );
 
   audioReceiverStream.common.rtpEndToEndLost =
     statsResults[mediaType][sendrecvType].totalPacketsLost - lastPacketsLost - fecRecovered || 0;
@@ -123,8 +113,9 @@ export const getAudioReceiverStreamMqa = ({
     statsResults[mediaType][sendrecvType].totalSamplesReceived - lastSamplesReceived || 0;
   audioReceiverStream.common.concealedFrames =
     statsResults[mediaType][sendrecvType].concealedSamples - lastConcealedSamples || 0;
-  audioReceiverStream.common.receivedBitrate =
-    ((statsResults[mediaType][sendrecvType].totalBytesReceived - lastBytesReceived) * 8) / 60 || 0;
+  audioReceiverStream.common.receivedBitrate = getBitrate(
+    statsResults[mediaType][sendrecvType].totalBytesReceived - lastBytesReceived
+  );
 };
 
 export const getAudioSenderMqa = ({audioSender, statsResults, lastMqaDataSent, baseMediaType}) => {
@@ -141,49 +132,47 @@ export const getAudioSenderMqa = ({audioSender, statsResults, lastMqaDataSent, b
   const totalPacketsLostOnReceiver = getTotalValue('totalPacketsLostOnReceiver');
   const totalPacketsSent = getTotalValue('totalPacketsSent');
 
-  const meanRemoteJitter = Object.keys(statsResults)
-    .filter((mt) => mt.includes(baseMediaType))
-    .reduce((acc, mt) => acc.concat(statsResults[mt][sendrecvType].meanRemoteJitter), []);
-  const meanRoundTripTime = Object.keys(statsResults)
-    .filter((mt) => mt.includes(baseMediaType))
-    .reduce((acc, mt) => acc.concat(statsResults[mt][sendrecvType].meanRoundTripTime), []);
-
-  audioSender.common.common.direction =
-    statsResults[Object.keys(statsResults).find((mediaType) => mediaType.includes(baseMediaType))]
-      ?.direction || 'inactive';
-  audioSender.common.common.isMain = !baseMediaType.includes('-share');
-  audioSender.common.transportType = statsResults.connectionType.local.transport;
-
-  audioSender.common.maxRemoteJitter = max(meanRemoteJitter) * 1000 || 0;
-  audioSender.common.meanRemoteJitter = mean(meanRemoteJitter) * 1000 || 0;
-
-  audioSender.common.rtpPackets = totalPacketsSent - lastPacketsSent || 0;
-  // audioSender.streams[0].common.rtpPackets = audioSender.common.rtpPackets;
-  // From candidate-pair
-  audioSender.common.availableBitrate = getTotalValueFromBaseType(
+  const meanRemoteJitter = getTotalValueFromBaseTypeArray(
     statsResults,
     sendrecvType,
     baseMediaType,
-    'availableOutgoingBitrate'
+    'meanRemoteJitter'
   );
-  // Calculate based on how much packets lost of received compated to how to the client sent
+  const meanRoundTripTime = getTotalValueFromBaseTypeArray(
+    statsResults,
+    sendrecvType,
+    baseMediaType,
+    'meanRoundTripTime'
+  );
 
+  audioSender.common.common.direction = getMediaTypeDirection(statsResults, baseMediaType);
+  audioSender.common.common.isMain = isMainMediaType(baseMediaType);
+  audioSender.common.transportType = statsResults.connectionType.local.transport;
+
+  audioSender.common.maxRemoteJitter = getMax(meanRemoteJitter);
+  audioSender.common.meanRemoteJitter = getMean(meanRemoteJitter);
+
+  audioSender.common.rtpPackets = getRtpPackets(totalPacketsSent, lastPacketsSent);
+
+  // From candidate-pair
+  audioSender.common.availableBitrate = getTotalValue('availableOutgoingBitrate');
+
+  // Calculate based on how much packets lost of received compated to how to the client sent
   const totalPacketsLostForaMin = totalPacketsLostOnReceiver - lastPacketsLostTotal;
   audioSender.common.remoteLossRate =
     totalPacketsSent - lastPacketsSent > 0
       ? (totalPacketsLostForaMin * 100) / (totalPacketsSent - lastPacketsSent)
       : 0; // This is the packets sent with in last min
 
-  audioSender.common.maxRoundTripTime = max(meanRoundTripTime) * 1000 || 0;
-  audioSender.common.meanRoundTripTime = mean(meanRoundTripTime) * 1000 || 0;
+  audioSender.common.maxRoundTripTime = getMax(meanRoundTripTime);
+  audioSender.common.meanRoundTripTime = getMean(meanRoundTripTime);
   audioSender.common.roundTripTime = audioSender.common.maxRoundTripTime;
 
   // Calculate the outgoing bitrate
   const totalBytesSentInaMin =
-    getTotalValueFromBaseType(statsResults, sendrecvType, baseMediaType, 'totalBytesSent') -
-    getTotalValueFromBaseType(lastMqaDataSent, sendrecvType, baseMediaType, 'totalBytesSent');
+    getTotalValue('totalBytesSent') - getLastTotalValue('totalBytesSent');
 
-  audioSender.common.rtpBitrate = totalBytesSentInaMin ? (totalBytesSentInaMin * 8) / 60 : 0;
+  audioSender.common.rtpBitrate = getBitrate(totalBytesSentInaMin);
 };
 
 export const getAudioSenderStreamMqa = ({
@@ -199,18 +188,16 @@ export const getAudioSenderStreamMqa = ({
   const lastFirCount = lastMqaDataSent[mediaType]?.[sendrecvType].totalFirCount || 0;
   const lastPacketsSent = lastMqaDataSent[mediaType]?.[sendrecvType].totalPacketsSent || 0;
 
-  const {csi} = statsResults[mediaType];
-  if (csi && !audioSenderStream.common.csi.includes(csi)) {
-    audioSenderStream.common.csi.push(csi);
-  }
+  getCsi(statsResults, mediaType, audioSenderStream);
 
-  audioSenderStream.common.rtpPackets =
-    statsResults[mediaType][sendrecvType].totalPacketsSent - lastPacketsSent || 0;
+  audioSenderStream.common.rtpPackets = getRtpPackets(
+    statsResults[mediaType][sendrecvType].totalPacketsSent,
+    lastPacketsSent
+  );
 
-  const totalBytesSentInaMin = statsResults[mediaType][sendrecvType].totalBytesSent - lastBytesSent;
-  audioSenderStream.common.transmittedBitrate = totalBytesSentInaMin
-    ? (totalBytesSentInaMin * 8) / 60
-    : 0;
+  audioSenderStream.common.transmittedBitrate = getBitrate(
+    statsResults[mediaType][sendrecvType].totalBytesSent - lastBytesSent
+  );
 
   audioSenderStream.transmittedKeyFrames =
     statsResults[mediaType][sendrecvType].totalKeyFramesEncoded - lastFramesEncoded || 0;
@@ -239,18 +226,19 @@ export const getVideoReceiverMqa = ({
   const totalPacketsReceived = getTotalValue('totalPacketsReceived');
   const totalBytesReceived = getTotalValue('totalBytesReceived');
 
-  const meanRemoteJitter = Object.keys(statsResults)
-    .filter((mt) => mt.includes(baseMediaType))
-    .reduce((acc, mt) => acc.concat(statsResults[mt][sendrecvType].meanRemoteJitter), []);
+  const meanRemoteJitter = getTotalValueFromBaseTypeArray(
+    statsResults,
+    sendrecvType,
+    baseMediaType,
+    'meanRemoteJitter'
+  );
 
-  videoReceiver.common.common.direction =
-    statsResults[Object.keys(statsResults).find((mediaType) => mediaType.includes(baseMediaType))]
-      ?.direction || 'inactive';
-  videoReceiver.common.common.isMain = !baseMediaType.includes('-share');
+  videoReceiver.common.common.direction = getMediaTypeDirection(statsResults, baseMediaType);
+  videoReceiver.common.common.isMain = isMainMediaType(baseMediaType);
   videoReceiver.common.transportType = statsResults.connectionType.local.transport;
 
   // collect the packets received for the last min
-  videoReceiver.common.rtpPackets = totalPacketsReceived - lastPacketsReceived || 0;
+  videoReceiver.common.rtpPackets = getRtpPackets(totalPacketsReceived, lastPacketsReceived);
 
   // Hop by hop are numbers and not percentage so we compare on what we sent the last min
   // this is including packet lost
@@ -259,15 +247,11 @@ export const getVideoReceiverMqa = ({
   videoReceiver.common.rtpHopByHopLost = totalPacketsLost;
 
   // calculate this values
-  videoReceiver.common.maxRemoteJitter = max(meanRemoteJitter) * 1000 || 0;
-  videoReceiver.common.meanRemoteJitter = mean(meanRemoteJitter) * 1000 || 0;
+  videoReceiver.common.maxRemoteJitter = getMax(meanRemoteJitter);
+  videoReceiver.common.meanRemoteJitter = getMean(meanRemoteJitter);
 
   // Calculate the outgoing bitrate
-  const totalBytesReceivedInaMin = totalBytesReceived - lastBytesReceived;
-
-  videoReceiver.common.rtpBitrate = totalBytesReceivedInaMin
-    ? (totalBytesReceivedInaMin * 8) / 60
-    : 0;
+  videoReceiver.common.rtpBitrate = getBitrate(totalBytesReceived - lastBytesReceived);
 };
 
 export const getVideoReceiverStreamMqa = ({
@@ -287,13 +271,12 @@ export const getVideoReceiverStreamMqa = ({
   const lastKeyFramesDecoded = lastMqaDataSent[mediaType]?.[sendrecvType].keyFramesDecoded || 0;
   const lastPliCount = lastMqaDataSent[mediaType]?.[sendrecvType].totalPliCount || 0;
 
-  const {csi} = statsResults[mediaType];
-  if (csi && !videoReceiverStream.common.csi.includes(csi)) {
-    videoReceiverStream.common.csi.push(csi);
-  }
+  getCsi(statsResults, mediaType, videoReceiverStream);
 
-  videoReceiverStream.common.rtpPackets =
-    statsResults[mediaType][sendrecvType].totalPacketsReceived - lastPacketsReceived || 0;
+  videoReceiverStream.common.rtpPackets = getRtpPackets(
+    statsResults[mediaType][sendrecvType].totalPacketsReceived,
+    lastPacketsReceived
+  );
 
   const totalPacketLoss =
     statsResults[mediaType][sendrecvType].totalPacketsLost - lastPacketsLost || 0;
@@ -301,15 +284,13 @@ export const getVideoReceiverStreamMqa = ({
   // End to end packetloss is after recovery
   videoReceiverStream.common.rtpEndToEndLost = totalPacketLoss;
 
-  videoReceiverStream.common.rtpJitter =
-    // @ts-ignore
-    max(statsResults[mediaType][sendrecvType].meanRemoteJitter) * 1000 || 0;
+  videoReceiverStream.common.rtpJitter = getMax(
+    statsResults[mediaType][sendrecvType].meanRemoteJitter
+  );
 
-  const totalBytesReceivedInaMin =
-    statsResults[mediaType][sendrecvType].totalBytesReceived - lastBytesReceived;
-  videoReceiverStream.common.receivedBitrate = totalBytesReceivedInaMin
-    ? (totalBytesReceivedInaMin * 8) / 60
-    : 0;
+  videoReceiverStream.common.receivedBitrate = getBitrate(
+    statsResults[mediaType][sendrecvType].totalBytesReceived - lastBytesReceived
+  );
 
   const totalFrameReceivedInaMin =
     statsResults[mediaType][sendrecvType].framesReceived - lastFramesReceived;
@@ -353,24 +334,27 @@ export const getVideoSenderMqa = ({videoSender, statsResults, lastMqaDataSent, b
   const totalBytesSent = getTotalValue('totalBytesSent');
   const availableOutgoingBitrate = getTotalValue('availableOutgoingBitrate');
 
-  videoSender.common.common.direction =
-    statsResults[Object.keys(statsResults).find((mediaType) => mediaType.includes(baseMediaType))]
-      ?.direction || 'inactive';
-  videoSender.common.common.isMain = !baseMediaType.includes('-share');
+  videoSender.common.common.direction = getMediaTypeDirection(statsResults, baseMediaType);
+  videoSender.common.common.isMain = isMainMediaType(baseMediaType);
   videoSender.common.transportType = statsResults.connectionType.local.transport;
 
-  const meanRemoteJitter = Object.keys(statsResults)
-    .filter((mt) => mt.includes(baseMediaType))
-    .reduce((acc, mt) => acc.concat(statsResults[mt][sendrecvType].meanRemoteJitter), []);
-  const meanRoundTripTime = Object.keys(statsResults)
-    .filter((mt) => mt.includes(baseMediaType))
-    .reduce((acc, mt) => acc.concat(statsResults[mt][sendrecvType].meanRoundTripTime), []);
+  const meanRemoteJitter = getTotalValueFromBaseTypeArray(
+    statsResults,
+    sendrecvType,
+    baseMediaType,
+    'meanRemoteJitter'
+  );
+  const meanRoundTripTime = getTotalValueFromBaseTypeArray(
+    statsResults,
+    sendrecvType,
+    baseMediaType,
+    'meanRoundTripTime'
+  );
 
-  // @ts-ignore
-  videoSender.common.maxRemoteJitter = max(meanRemoteJitter) * 1000 || 0;
-  videoSender.common.meanRemoteJitter = mean(meanRemoteJitter) * 1000 || 0;
+  videoSender.common.maxRemoteJitter = getMax(meanRemoteJitter);
+  videoSender.common.meanRemoteJitter = getMean(meanRemoteJitter);
 
-  videoSender.common.rtpPackets = totalPacketsSent - lastPacketsSent;
+  videoSender.common.rtpPackets = getRtpPackets(totalPacketsSent, lastPacketsSent);
   videoSender.common.availableBitrate = availableOutgoingBitrate;
 
   // Calculate based on how much packets lost of received compated to how to the client sent
@@ -381,14 +365,14 @@ export const getVideoSenderMqa = ({videoSender, statsResults, lastMqaDataSent, b
       ? (totalPacketsLostForaMin * 100) / (totalPacketsSent - lastPacketsSent)
       : 0; // This is the packets sent with in last min || 0;
 
-  videoSender.common.maxRoundTripTime = max(meanRoundTripTime) * 1000 || 0;
-  videoSender.common.meanRoundTripTime = mean(meanRoundTripTime) * 1000 || 0;
+  videoSender.common.maxRoundTripTime = getMax(meanRoundTripTime);
+  videoSender.common.meanRoundTripTime = getMean(meanRoundTripTime);
   videoSender.common.roundTripTime = videoSender.common.maxRoundTripTime;
 
   // Calculate the outgoing bitrate
   const totalBytesSentInaMin = totalBytesSent - lastBytesSent;
 
-  videoSender.common.rtpBitrate = totalBytesSentInaMin ? (totalBytesSentInaMin * 8) / 60 : 0;
+  videoSender.common.rtpBitrate = getBitrate(totalBytesSentInaMin);
 };
 
 export const getVideoSenderStreamMqa = ({
@@ -406,20 +390,16 @@ export const getVideoSenderStreamMqa = ({
   const lastFirCount = lastMqaDataSent[mediaType]?.[sendrecvType].totalFirCount || 0;
   const lastFramesSent = lastMqaDataSent[mediaType]?.[sendrecvType].framesSent || 0;
 
-  const {csi} = statsResults[mediaType];
-  if (csi && !videoSenderStream.common.csi.includes(csi)) {
-    videoSenderStream.common.csi.push(csi);
-  }
+  getCsi(statsResults, mediaType, videoSenderStream);
 
-  videoSenderStream.common.rtpPackets =
-    statsResults[mediaType][sendrecvType].totalPacketsSent - lastPacketsSent || 0;
+  videoSenderStream.common.rtpPackets = getRtpPackets(
+    statsResults[mediaType][sendrecvType].totalPacketsSent,
+    lastPacketsSent
+  );
 
-  // Calculate the outgoing bitrate
-  const totalBytesSentInaMin = statsResults[mediaType][sendrecvType].totalBytesSent - lastBytesSent;
-
-  videoSenderStream.common.transmittedBitrate = totalBytesSentInaMin
-    ? (totalBytesSentInaMin * 8) / 60
-    : 0;
+  videoSenderStream.common.transmittedBitrate = getBitrate(
+    statsResults[mediaType][sendrecvType].totalBytesSent - lastBytesSent
+  );
 
   videoSenderStream.transmittedKeyFrames =
     statsResults[mediaType][sendrecvType].totalKeyFramesEncoded - lastKeyFramesEncoded || 0;
